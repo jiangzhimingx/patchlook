@@ -2,6 +2,7 @@
 mod about;
 mod app;
 mod change_tree;
+mod diff_overview;
 mod file_icons;
 mod image_diff;
 mod remote_repository;

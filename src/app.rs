@@ -1,5 +1,6 @@
 use crate::{
     change_tree::{ChangeTree, file_status_color, stats_label},
+    diff_overview::DiffOverview,
     file_icons::file_icon,
     image_diff::{ImageDiff, ImageVersions, image_format},
     strings::tr,
@@ -73,7 +74,11 @@ enum ChangeOperation {
 }
 
 enum FileContent {
-    Text(Vec<DiffFile>, Option<Arc<ReviewPatch>>),
+    Text {
+        diffs: Vec<DiffFile>,
+        overview: DiffOverview,
+        review: Option<Arc<ReviewPatch>>,
+    },
     Image(ImageVersions),
 }
 
@@ -88,23 +93,24 @@ impl FileContent {
             if commit.is_none() {
                 Self::from_review(repo.review_patch(change)?)
             } else {
-                Ok(Self::Text(
-                    DiffFile::parse(&repo.patch(change, commit)?)?,
-                    None,
-                ))
+                let patch = repo.patch(change, commit)?;
+                let (diffs, overview) = DiffOverview::parse([patch.as_str()])?;
+                Ok(Self::Text {
+                    diffs,
+                    overview,
+                    review: None,
+                })
             }
         }
     }
 
     fn from_review(review: ReviewPatch) -> anyhow::Result<Self> {
-        let files = review
-            .patches()
-            .map(DiffFile::parse)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        Ok(Self::Text(files, Some(Arc::new(review))))
+        let (diffs, overview) = DiffOverview::parse(review.patches())?;
+        Ok(Self::Text {
+            diffs,
+            overview,
+            review: Some(Arc::new(review)),
+        })
     }
 }
 
@@ -220,7 +226,10 @@ impl PreparedChanges {
                 }
             });
         let mut counts = HashMap::new();
-        if let Some(Ok(FileContent::Text(_, Some(review)))) = &preview
+        if let Some(Ok(FileContent::Text {
+            review: Some(review),
+            ..
+        })) = &preview
             && let Some(stats) = review.text_stats()
         {
             counts.insert(merged[preview_index.unwrap()].path.clone(), Some(stats));
@@ -231,7 +240,10 @@ impl PreparedChanges {
             .map(|(index, change)| {
                 if change.area == Area::Partial {
                     if preview_index == Some(index)
-                        && let Some(Ok(FileContent::Text(_, Some(review)))) = &preview
+                        && let Some(Ok(FileContent::Text {
+                            review: Some(review),
+                            ..
+                        })) = &preview
                     {
                         return Ok(Some(review.progress()));
                     }
@@ -297,6 +309,7 @@ struct ChangeState {
     file_scroll: UniformListScrollHandle,
     selected_file: Option<usize>,
     diff: Entity<DiffState>,
+    overview: DiffOverview,
     staging_patch: Option<Arc<ReviewPatch>>,
     image: Option<Entity<ImageDiff>>,
     image_subscription: Option<Subscription>,
@@ -328,6 +341,7 @@ impl ChangeState {
             file_scroll: UniformListScrollHandle::new(),
             selected_file: None,
             diff,
+            overview: DiffOverview::default(),
             staging_patch: None,
             image: None,
             image_subscription: None,
@@ -1893,9 +1907,15 @@ impl Patchlook {
         let files = self.files_for_mut(source);
         match result {
             Ok(content) => {
-                let (diffs, image, staging) = match content {
-                    FileContent::Text(diffs, staging) => (diffs, None, staging),
-                    FileContent::Image(image) => (Vec::new(), Some(image), None),
+                let (diffs, overview, image, staging) = match content {
+                    FileContent::Text {
+                        diffs,
+                        overview,
+                        review,
+                    } => (diffs, overview, None, review),
+                    FileContent::Image(image) => {
+                        (Vec::new(), DiffOverview::default(), Some(image), None)
+                    }
                 };
                 let same_content = stable_side.is_some()
                     && files
@@ -1904,6 +1924,7 @@ impl Patchlook {
                         .zip(staging.as_ref())
                         .is_some_and(|(old, new)| old.patches().eq(new.patches()));
                 files.staging_patch = staging;
+                files.overview = overview;
                 files.empty_patch = diffs.is_empty() && image.is_none();
                 files.image = image.map(|image| cx.new(|_| ImageDiff::new(image)));
                 files.image_subscription = files
@@ -1923,6 +1944,7 @@ impl Patchlook {
             }
             Err(error) => {
                 files.staging_patch = None;
+                files.overview = DiffOverview::default();
                 files.image = None;
                 files.image_subscription = None;
                 files.diff.update(cx, |diff, cx| diff.set_files([], cx));
@@ -3967,7 +3989,8 @@ impl Patchlook {
         } else if let Some(image) = &self.active_files().image {
             image.clone().into_any_element()
         } else if self.active_files().selected_file.is_some() {
-            Diff::new(&self.active_files().diff)
+            let files = self.active_files();
+            let diff = Diff::new(&files.diff)
                 .line_number_selection(false)
                 .when(
                     self.staging_visible() && self.working.staging_patch.is_some(),
@@ -4043,9 +4066,8 @@ impl Patchlook {
                     })
                 })
                 .soft_wrap(self.preferences.soft_wrap)
-                .hunk_separator(DiffHunkSeparator::Wave)
-                .size_full()
-                .into_any_element()
+                .hunk_separator(DiffHunkSeparator::Wave);
+            files.overview.view(diff, &files.diff, cx)
         } else if self.view == View::Working && self.active_files().changes.is_empty() {
             self.message("clean_title", Some("clean_body"), cx)
         } else if self.view != View::Working && self.history.commits.is_empty() {
@@ -8082,6 +8104,62 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    #[gpui_kit::test]
+    fn diff_overview_places_offscreen_changes_and_jumps_to_them(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("changes.txt");
+        git(root, &["init", "-b", "main"]);
+        let mut lines = (1..=200).map(|i| format!("Line {i}\n")).collect::<Vec<_>>();
+        std::fs::write(&path, lines.concat()).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "Base"]);
+        lines.remove(39);
+        lines.insert(159, "INSERTED_NEAR_END\n".into());
+        std::fs::write(&path, lines.concat()).unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app = test_app(window, cx);
+                    app.load(root.to_owned(), cx);
+                    app
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            app.read(cx).working.diff.clone().update(cx, |diff, cx| {
+                diff.set_context_lines(None, cx);
+                diff.scroll_to_file("changes.txt", cx);
+            });
+            window.render_frame(cx);
+            let visible = |window: &Window, label: &str| {
+                window
+                    .find_all("source")
+                    .iter()
+                    .any(|line| line.visible() && line.label() == Some(label))
+            };
+            assert!(!visible(window, "INSERTED_NEAR_END"));
+            let track = window.find("diff-overview").bounds();
+            for (index, fraction, label) in [
+                (1usize, 0.80, "INSERTED_NEAR_END"),
+                (0usize, 0.20, "Line 40"),
+            ] {
+                let id = ("diff-overview-mark", index);
+                let marker = window.find(id).bounds();
+                let offset = f32::from(marker.top() - track.top()) / f32::from(track.size.height);
+                assert!((offset - fraction).abs() < 0.025, "marker at {offset}");
+                window.click(id, cx);
+                window.render_frame(cx);
+                assert!(visible(window, label), "marker did not reveal {label}");
+                assert_eq!(app.read(cx).working.selected_file, Some(0));
+            }
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
