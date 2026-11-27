@@ -85,6 +85,12 @@ pub enum DiffEvent {
     SelectionChanged(Option<DiffLineRange>),
     /// A selection gesture finished; the range is ready to act on.
     SelectionEnded(DiffLineRange),
+    /// The native text selection is settled.
+    TextSelectionFinished,
+    /// The native text selection was cleared.
+    TextSelectionCleared,
+    /// The source documents were replaced or refreshed.
+    FilesChanged,
     /// The user expanded a collapsed file from its header.
     FileExpanded(SharedString),
     /// The user collapsed a file from its header.
@@ -313,13 +319,19 @@ impl DiffState {
                 let _ = weak.update(cx, |state, cx| {
                     if !state.selection.has_local_selection(cx) {
                         match event {
-                            TextSelectionEvent::SelectionChanged(Some(_)) => {
+                            TextSelectionEvent::SelectionChanged(Some(snapshot)) => {
                                 let changed = state.selected_lines.take().is_some();
                                 // A new text gesture ends the previous gutter anchor.
                                 state.selection_anchor = None;
                                 state.selection_cursor = None;
                                 if changed {
                                     cx.emit(DiffEvent::SelectionChanged(None));
+                                }
+                                if !snapshot.is_selecting()
+                                    && snapshot.anchor().entity_id()
+                                        == Some(state.selection.entity_id())
+                                {
+                                    cx.emit(DiffEvent::TextSelectionFinished);
                                 }
                             }
                             TextSelectionEvent::Cleared => {
@@ -329,6 +341,7 @@ impl DiffState {
                                 if state.selected_lines.take().is_some() {
                                     cx.emit(DiffEvent::SelectionChanged(None));
                                 }
+                                cx.emit(DiffEvent::TextSelectionCleared);
                             }
                             _ => {}
                         }
@@ -597,6 +610,7 @@ impl DiffState {
         self.rebuild(true);
         self.horizontal_scroll.set_offset(point(px(0.), px(0.)));
         self.ensure_presentation(cx);
+        cx.emit(DiffEvent::FilesChanged);
         cx.notify();
     }
 
@@ -865,16 +879,37 @@ impl DiffState {
             .to_owned()
     }
 
+    /// Returns the native text selection when it fits on a single line.
+    pub fn selected_inline_text(&self, cx: &App) -> Option<&str> {
+        let (file, side, range) = super::selection::selected_source_range(&self.selection, cx)?;
+        let text = self.files.get(file)?.source(side).get(range)?;
+        (!text.contains(['\r', '\n'])).then_some(text)
+    }
+
     /// Reveals and scrolls to a source line, expanding its file and hidden
     /// context if needed.
     pub fn scroll_to_line(&mut self, position: DiffLinePosition, cx: &mut Context<Self>) {
+        self.scroll_to_source(position, None, cx);
+    }
+
+    /// Scrolls to a source line, revealing only nearby context within a fold.
+    pub fn scroll_to_line_nearby(&mut self, position: DiffLinePosition, cx: &mut Context<Self>) {
+        self.scroll_to_source(position, Some(self.context_lines.unwrap_or(3)), cx);
+    }
+
+    fn scroll_to_source(
+        &mut self,
+        position: DiffLinePosition,
+        context: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         if self.line_index(&position).is_none() {
             return;
         }
         if self.collapsed.remove(position.path().as_str()) {
             self.rebuild_at_anchor();
         }
-        if self.expand_line(&position).is_some() {
+        if self.expand_line(&position, context).is_some() {
             self.reveal_line(&position);
             cx.notify();
         }
@@ -1080,7 +1115,7 @@ impl DiffState {
         window.focus(&self.focus, cx);
         let range = self.select_user_range(anchor, position.clone(), cx);
         cx.emit(DiffEvent::SelectionEnded(range));
-        if let Some(row) = self.expand_line(&position) {
+        if let Some(row) = self.expand_line(&position, None) {
             self.list.scroll_to_reveal_item(row);
         }
     }
@@ -1267,11 +1302,32 @@ impl DiffState {
         (document.lines_count(side) > 0).then_some((file, side))
     }
 
-    fn expand_line(&mut self, position: &DiffLinePosition) -> Option<usize> {
+    fn expand_line(
+        &mut self,
+        position: &DiffLinePosition,
+        context: Option<usize>,
+    ) -> Option<usize> {
         let row = self.source_row(position)?;
         if let Some(DisplayRow::Fold { file, pairs }) = self.rows.get(row) {
-            let (file, pairs) = (*file, pairs.clone());
-            self.expanded[file].push(pairs);
+            let revealed = if let Some(context) = context {
+                let line = self.line_index(position)?;
+                let offset = self.files[*file].pairs()[pairs.clone()].partition_point(|pair| {
+                    let index = match position.side() {
+                        DiffSide::Original => pair.original(),
+                        DiffSide::Modified => pair.modified(),
+                    };
+                    index.is_some_and(|index| index < line)
+                });
+                let center = pairs.start + offset;
+                center.saturating_sub(context).max(pairs.start)
+                    ..center
+                        .saturating_add(context)
+                        .saturating_add(1)
+                        .min(pairs.end)
+            } else {
+                pairs.clone()
+            };
+            self.expanded[*file].push(revealed);
             self.rebuild_at_anchor();
         }
         self.source_row(position)

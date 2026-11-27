@@ -184,6 +184,8 @@ type AnnotationRenderer = Rc<dyn Fn(&DiffAnnotation, &mut Window, &mut App) -> A
 type RangeHandler = Rc<dyn Fn(&DiffLineRange, &mut Window, &mut App)>;
 type ClickHandler = Rc<dyn Fn(&DiffLinePosition, &ClickEvent, &mut Window, &mut App)>;
 type HoverHandler = Rc<dyn Fn(Option<&DiffLinePosition>, &mut Window, &mut App)>;
+type TextHighlightRenderer =
+    Rc<dyn Fn(&DiffLinePosition) -> Vec<(std::ops::Range<usize>, HighlightStyle)>>;
 
 #[derive(Default)]
 struct HeaderSlots {
@@ -230,6 +232,7 @@ pub struct Diff {
     on_add_annotation: Option<RangeHandler>,
     on_line_click: Option<ClickHandler>,
     on_line_hover: Option<HoverHandler>,
+    text_highlights: Option<TextHighlightRenderer>,
 }
 
 fn file_renderer<F, E>(render: F) -> FileRenderer
@@ -264,6 +267,7 @@ impl Diff {
             on_add_annotation: None,
             on_line_click: None,
             on_line_hover: None,
+            text_highlights: None,
         }
     }
     /// Renders application-owned controls beside each source line, after the line numbers.
@@ -318,6 +322,15 @@ impl Diff {
     /// Emphasizes syntax once the state has prepared it. Default is true.
     pub fn syntax_highlight(mut self, value: bool) -> Self {
         self.syntax_highlight = value;
+        self
+    }
+    /// Supplies extra highlights for rendered source lines. Ranges use UTF-8
+    /// byte offsets in the original line text, before tabs are expanded.
+    pub fn text_highlights<F>(mut self, highlights: F) -> Self
+    where
+        F: Fn(&DiffLinePosition) -> Vec<(std::ops::Range<usize>, HighlightStyle)> + 'static,
+    {
+        self.text_highlights = Some(Rc::new(highlights));
         self
     }
     /// Shows a header above each file. Default is true.
@@ -615,6 +628,7 @@ fn render_diff(
         on_add_annotation: props.on_add_annotation,
         on_line_click: props.on_line_click,
         on_line_hover: props.on_line_hover,
+        text_highlights: props.text_highlights,
         selection: state.selection().clone(),
         selected_lines: state.selected_lines(),
         selected: state.selected_span(),
@@ -906,6 +920,7 @@ struct CodePresentation {
     on_add_annotation: Option<RangeHandler>,
     on_line_click: Option<ClickHandler>,
     on_line_hover: Option<HoverHandler>,
+    text_highlights: Option<TextHighlightRenderer>,
     selection: gpui_base::TextSelectionHandle,
     selected_lines: Option<DiffLineRange>,
     selected: Option<SelectedLines>,
@@ -1816,6 +1831,19 @@ fn line_highlights(
                 },
             )
         }));
+    }
+    if let Some(render) = &code.text_highlights {
+        let text = line.text();
+        highlights.extend(
+            render(&code.position(file, side, ix))
+                .into_iter()
+                .filter_map(|(range, style)| {
+                    (!range.is_empty()
+                        && text.is_char_boundary(range.start)
+                        && text.is_char_boundary(range.end))
+                    .then(|| (line.display_range(range), style))
+                }),
+        );
     }
     if selected {
         highlights.push((

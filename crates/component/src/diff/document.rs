@@ -487,6 +487,20 @@ impl DiffFile {
     pub fn modified_path(&self) -> Option<&SharedString> {
         self.inner.modified.path.as_ref()
     }
+
+    /// Text lines in patch order, including folded context. Each entry contains
+    /// the original and modified line number and text, respectively. Unchanged
+    /// lines share one entry; each deleted or added line has its own entry.
+    pub fn source_lines_in_patch_order(
+        &self,
+    ) -> impl Iterator<Item = [Option<(usize, &str)>; 2]> + '_ {
+        self.patch_lines().iter().map(|row| {
+            [DiffSide::Original, DiffSide::Modified].map(|side| {
+                let line = &self.lines(side)[row.line(side)?];
+                Some((line.line_number, line.text().as_str()))
+            })
+        })
+    }
     /// Git extended header lines, such as file modes, similarity, renames
     /// and the binary marker, as they appear in the patch.
     pub fn extended_headers(&self) -> &[SharedString] {
