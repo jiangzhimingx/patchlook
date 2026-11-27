@@ -1,4 +1,7 @@
 {
+  "find_in_diff": "在差異中尋找",
+  "previous_match": "上一個符合項目",
+  "next_match": "下一個符合項目",
   "app_name": "Patchlook",
   "application_menu": "應用程式選單",
   "open_repository": "開啟儲存庫",

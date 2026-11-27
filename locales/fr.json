@@ -1,4 +1,7 @@
 {
+  "find_in_diff": "Rechercher dans les différences",
+  "previous_match": "Résultat précédent",
+  "next_match": "Résultat suivant",
   "app_name": "Patchlook",
   "application_menu": "Menu de l’application",
   "open_repository": "Ouvrir un dépôt",
