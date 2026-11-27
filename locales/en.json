@@ -1,4 +1,7 @@
 {
+  "find_in_diff": "Find in diff",
+  "previous_match": "Previous match",
+  "next_match": "Next match",
   "app_name": "Patchlook",
   "application_menu": "Application menu",
   "open_repository": "Open repository",

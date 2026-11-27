@@ -18,7 +18,7 @@
 
 ## Project Conventions
 - 后续定制需求在 `jiangzhimingx/patchlook` 的 `custom/patchlook` 分支开发。该分支基于 macOS 预览包使用的功能提交 `987acf9`。
-- GPUI 统一从 `gpui_kit` 导入，复用主题／控件；界面文案在九份 `locales/*.json`，键及占位符一致。Kit 0.8.0 固定 fork revision `a816d86870c469b472c2453a10945d2564d380be`（已推送），维护 Cargo.lock，不提交本机 path override；升级及补丁归属见 `docs/development.md`。
+- GPUI 统一从 `gpui_kit` 导入，复用主题／控件；界面文案在九份 `locales/*.json`，键及占位符一致。Kit 0.8.0 的基础为 fork revision `a816d86870c469b472c2453a10945d2564d380be`，查找所需接口在 `jiangzhimingx/patchlook` 的 `deps/gpui-kit-diff-search` 分支，固定 `7568d13d14503c03d5b34ac001e2a10b744168dc`。维护 Cargo.lock，升级及补丁归属见 `docs/development.md`。
 - `.gitattributes` 强制 shell 脚本 LF；嵌入 SSH worker 不得随 Windows 检出转 CRLF，所有平台测试内嵌脚本换行。
 - Git 基线：未暂存比较索引与工作区，暂存比较 HEAD 与索引；根提交按新增，合并提交比较第一父提交。历史／搜索固定首次解析的分支 tip；搜索完整消息忽略大小写的子串或 SHA 前缀，每页 100 条加一条前瞻。
 - 测试共享进程级 locale，须串行：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked -- --test-threads=1`；交互验收使用 Release，打包改动另跑 Python 3.11+ 的 scripts 单元测试。系统应用查询／本机认证 socket 测试需要系统能力，不以沙箱失败判功能失败。
@@ -36,6 +36,7 @@
 - 本地写入：同文件单条，空框／横线／对号表示暂存程度，部分显示 x/y；目录／分组批量操作限后代。右侧行号栏勾选连续块，左侧 `»` 确认丢弃，无单行入口或额外缩进；已暂存背景保留 30%，hover 半透明，行号不触发整行选择。撤销／重做每次点击一步，跨文件共用栈，刷新保留，切仓库／关窗口清空，外部冲突拒绝覆盖；二进制／非普通文件仅整文件操作，冲突交外部工具。
 - Git diff：并排／行内、语法与行内高亮、折行、同步滚动、复制、上下文折叠；仓库和独立文本窗口共用 3,000 字节的单行行内高亮上限，超长行保留整行底色；波浪分隔线按方向每次最多展开 20 行，剩余一行仍折叠，顶部全部展开／收起保留；改动状态改变而文本不变时不替换 diff，补丁变动保留稳定源视口。图片支持适应／1:1／缩放。持久化外观、语言、diff 布局、文件列表样式、行号／统计／折行／说明、Recent、浏览分支和 Repos 侧栏比例；其余窗口／Tab／选择／搜索不保存。每窗口默认绿灯闭锁只读，橙灯开锁读写；锁按钮无文字、tooltip 说明，操作中禁用保持外观。
 - 仓库文本 diff 在滚动条旁显示按全文对齐行定位的差异总览，新增为绿、删除为红、替换用双色。悬停显示改动类型和行号，点击使用 Kit 的源码行定位。
+- 仓库和独立文本 diff 共用 `diff_search.rs`。单行选区在释放鼠标后匹配，⌘F／Ctrl+F 唤出字面查找，输入防抖及后台取消避免扫描积压。折叠行参与匹配，导航仅展开命中附近，未改两侧行共用命中计数。
 - About、logo、许可证、中英文 README及真实浅暗截图；九语言主页提供语言菜单、直接切主题、平台下载浮层、Homebrew、单行 SHA-256 和复制，缺失／无效附件哈希阻止构建。SEO 元数据／JSON-LD／sitemap 与内容同源，Google 验证标签已部署；项目 Pages 的 sitemap 需自行提交站长工具。
 
 ### In Progress
@@ -51,6 +52,7 @@
 暂无。
 
 ## Verification
+- Diff 查找已从固定 Git 依赖通过 Linux 格式、Clippy、全量 Rust 测试（136 通过，9 项 SSH fixture 测试按配置跳过）及 4 项打包脚本测试。界面回归覆盖拖选期间零匹配、松手后匹配、快捷键和折叠上下文中的命中跳转。
 - 差异总览已通过 Linux 格式检查、Clippy 和全量 Rust 测试（134 通过，9 项 SSH fixture 测试按默认配置跳过）。界面回归验证视口外新增／删除的相对位置、点击跳转及文件选择。
 - `custom/patchlook` 的仓库与分支搜索已通过 Linux 格式检查、Clippy 和全量 Rust 测试（133 通过，9 项 SSH fixture 测试按默认配置跳过）。覆盖多关键词、大小写、远程仓库、折叠子模块、清除搜索与选择分支，并通过提交区间、常驻文件树和差异块跳转回归。
 - 常驻文件树和差异块跳转已通过 Linux 全量 Rust 测试（131 通过，9 忽略）、Clippy 与 4 项打包脚本测试；提交区间的回归也通过。

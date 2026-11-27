@@ -3,6 +3,7 @@ mod about;
 mod app;
 mod change_tree;
 mod diff_overview;
+mod diff_search;
 mod file_icons;
 mod image_diff;
 mod remote_repository;
@@ -54,6 +55,7 @@ fn main() -> anyhow::Result<()> {
             });
             cx.on_action(|_: &Quit, cx| cx.quit());
             text_compare::init(cx);
+            diff_search::init(cx);
             cx.bind_keys([
                 KeyBinding::new("secondary-o", OpenRepository, None),
                 KeyBinding::new("secondary-r", Refresh, None),
@@ -151,6 +153,7 @@ fn update_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action(tr("copy"), component::input::Copy),
                 MenuItem::action(tr("select_all"), component::input::SelectAll),
+                MenuItem::action(tr("find_in_diff"), diff_search::FindInDiff),
             ],
         },
     ]);

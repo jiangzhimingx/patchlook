@@ -63,6 +63,8 @@ In the unfiltered history, click one commit and Shift-click another to review th
 
 In **v0.1.7+**, **Repos** also lists submodules beneath their parent repository. Expand the parent and select a submodule to browse it as a separate repository. Uninitialized submodules are shown but cannot be opened; initialize them with Git and refresh the parent. Staging inside a submodule affects its own index; staging its entry in the parent records only the submodule revision.
 
+Select text within a line and release the mouse to highlight matching text in the diff. Press **⌘F** on macOS or **Ctrl+F** on Windows/Linux to find text, including inside folded context. Press Enter or Shift+Enter to move between matches.
+
 Refresh after making changes in another tool. Branch browsing uses the opened repository's Git references; fetch updates with your usual Git client.
 
 Text diffs require UTF-8. Supported images are shown as previews; other binary files are listed without a content diff.

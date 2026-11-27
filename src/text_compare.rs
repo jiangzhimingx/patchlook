@@ -1,5 +1,6 @@
 use crate::{
     app::{About, Quit},
+    diff_search::{DiffSearch, FindInDiff},
     strings::tr,
     ui::{
         DIFF_INLINE_MAX_LINE_BYTES, DisplaySettings, apply_appearance, apply_language, icon_button,
@@ -92,6 +93,7 @@ struct Source {
 pub struct TextComparison {
     sources: [Source; 2],
     diff: Entity<DiffState>,
+    find: Entity<DiffSearch>,
     result: bool,
     identical: bool,
     soft_wrap: bool,
@@ -147,8 +149,10 @@ impl TextComparison {
                 .with_mode(DiffMode::Split)
                 .with_inline_max_line_length(DIFF_INLINE_MAX_LINE_BYTES)
         });
+        let find = cx.new(|cx| DiffSearch::new(diff.clone(), cx));
         let subscriptions = vec![
             cx.observe(&diff, |_, _, cx| cx.notify()),
+            cx.observe(&find, |_, _, cx| cx.notify()),
             cx.observe_global_in::<DisplaySettings>(window, |this, window, cx| {
                 this.update_translations(window, cx);
                 cx.notify();
@@ -171,6 +175,7 @@ impl TextComparison {
         Self {
             sources,
             diff,
+            find,
             soft_wrap,
             result: false,
             identical: false,
@@ -187,6 +192,8 @@ impl TextComparison {
 
     fn update_translations(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.set_window_title(tr("text_comparison"));
+        self.find
+            .update(cx, |find, cx| find.update_placeholder(window, cx));
         for source in &self.sources {
             source.editor.update(cx, |editor, cx| {
                 editor.set_placeholder(tr("compare_placeholder"), window, cx);
@@ -811,6 +818,11 @@ impl Render for TextComparison {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::compare))
             .on_action(cx.listener(Self::refresh_files))
+            .on_action(cx.listener(|this, _: &FindInDiff, window, cx| {
+                if this.result {
+                    this.find.update(cx, |find, cx| find.open(window, cx));
+                }
+            }))
             .on_action(cx.listener(|_, _: &CloseTextComparison, window, _| window.remove_window()))
             .on_action(cx.listener(|this, _: &About, window, cx| {
                 this.about.update(cx, |about, cx| about.show(window, cx));
@@ -894,24 +906,24 @@ impl Render for TextComparison {
                 )
             })
             .child(if self.result {
+                let diff = Diff::new(&self.diff)
+                    .header_visible(false)
+                    .line_number_selection(false)
+                    .change_indicator(DiffChangeIndicator::Bars)
+                    .hunk_separator(DiffHunkSeparator::Wave)
+                    .soft_wrap(self.soft_wrap)
+                    .when_some(
+                        cx.theme().highlight_theme.style.editor_foreground,
+                        |diff, color| diff.text_color(color),
+                    )
+                    .flex_1()
+                    .min_h_0();
                 v_flex()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .child(
-                        Diff::new(&self.diff)
-                            .header_visible(false)
-                            .line_number_selection(false)
-                            .change_indicator(DiffChangeIndicator::Bars)
-                            .hunk_separator(DiffHunkSeparator::Wave)
-                            .soft_wrap(self.soft_wrap)
-                            .when_some(
-                                cx.theme().highlight_theme.style.editor_foreground,
-                                |diff, color| diff.text_color(color),
-                            )
-                            .flex_1()
-                            .min_h_0(),
-                    )
+                    .child(self.find.clone())
+                    .child(self.find.read(cx).highlight(diff, cx))
                     .into_any_element()
             } else {
                 h_flex()

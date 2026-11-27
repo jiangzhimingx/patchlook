@@ -1,4 +1,7 @@
 {
+  "find_in_diff": "차이에서 찾기",
+  "previous_match": "이전 일치 항목",
+  "next_match": "다음 일치 항목",
   "app_name": "Patchlook",
   "application_menu": "앱 메뉴",
   "open_repository": "저장소 열기",

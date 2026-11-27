@@ -263,6 +263,8 @@ Patchlook uses the [GPUI Kit fork](https://github.com/worldtheater/gpui-kit/tree
 
 The patch series starts from the GPUI Kit 0.8.0 source commit `1676826d9d49b90f4d7b6808b69924f58796f6f1`. Its current tip is `a816d86870c469b472c2453a10945d2564d380be`.
 
+On `custom/patchlook`, [Cargo.toml](../Cargo.toml) pins a [dependency branch](https://github.com/jiangzhimingx/patchlook/tree/deps/gpui-kit-diff-search) based on that tip. Its diff hooks expose source text in patch order, report completed text selections, render extra character highlights and reveal matches inside folded context.
+
 | Commit | Purpose |
 | --- | --- |
 | `697e0e7e` | Apply touchpad release velocity only when an edge is already stretched. |

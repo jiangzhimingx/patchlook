@@ -1,4 +1,7 @@
 {
+  "find_in_diff": "差分内を検索",
+  "previous_match": "前の一致",
+  "next_match": "次の一致",
   "app_name": "Patchlook",
   "application_menu": "アプリケーションメニュー",
   "open_repository": "リポジトリを開く",
