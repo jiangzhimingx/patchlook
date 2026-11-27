@@ -57,7 +57,7 @@ macOS release builds are signed and notarized. Linux packages are built on Ubunt
 
 1. Choose **Open repository** for a local repository, or [connect via SSH](#connect-to-a-linux-server) for a remote one.
 2. Use **Changes** to review your working tree and staging area, or **History** to inspect commits.
-3. Use **Repos** to switch repositories or browse another branch.
+3. Use **Repos** to switch repositories or browse another branch. Search **Recent** by repository name or path, or search **Branches** by branch name. Both lists filter as you type. For example, `dev master` shows entries containing either word, regardless of case.
 
 In the unfiltered history, click one commit and Shift-click another to review the net changes in the inclusive range. The file list compares the oldest commit’s first parent with the newest commit. The endpoints must be on the same line of history. The changed files stay visible when you open a diff. Use the up and down arrows above the diff to jump between change blocks in the selected file.
 
