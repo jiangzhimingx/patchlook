@@ -432,9 +432,11 @@ pub struct Patchlook {
     branch: String,
     branches: Vec<Branch>,
     repository_scroll: ScrollHandle,
+    repository_search: Entity<InputState>,
     collapsed_repository_groups: [bool; 2],
     collapsed_repositories: HashSet<RepositoryLocation>,
     branch_scroll: UniformListScrollHandle,
+    branch_search: Entity<InputState>,
     view: View,
     working: ChangeState,
     history: HistoryState,
@@ -473,6 +475,10 @@ impl Patchlook {
         DisplaySettings::get(cx).copy_to(&mut preferences);
         apply_appearance(preferences.appearance, window, cx);
         apply_language(preferences.language, cx);
+        let repository_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("search_repositories")));
+        let branch_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr("search_branches")));
         let history_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr("search_commits_placeholder")));
         let subscriptions = vec![
@@ -480,6 +486,19 @@ impl Patchlook {
                 DisplaySettings::get(cx).copy_to(&mut this.preferences);
                 this.update_translations(window, cx);
                 cx.notify();
+            }),
+            cx.subscribe(&repository_search, |this, _, event, cx| {
+                if matches!(event, TextInputEvent::Change) {
+                    this.repository_scroll.set_offset(Point::default());
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&branch_search, |this, _, event, cx| {
+                if matches!(event, TextInputEvent::Change) {
+                    this.branch_scroll
+                        .scroll_to_item_strict(0, ScrollStrategy::Top);
+                    cx.notify();
+                }
             }),
             cx.subscribe(&history_search, |this, input, event, cx| {
                 if matches!(event, TextInputEvent::PressEnter { .. })
@@ -498,12 +517,7 @@ impl Patchlook {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() && this.preferences.language == Language::System {
                     apply_language(Language::System, cx);
-                    if let Some(tree) = &this.working.change_tree {
-                        tree.update_group_labels(cx);
-                    }
-                    this.history_search.update(cx, |input, cx| {
-                        input.set_placeholder(tr("search_commits_placeholder"), window, cx);
-                    });
+                    this.update_translations(window, cx);
                 }
             }),
         ];
@@ -543,9 +557,11 @@ impl Patchlook {
             branch: String::new(),
             branches: vec![],
             repository_scroll: ScrollHandle::new(),
+            repository_search,
             collapsed_repository_groups: [false; 2],
             collapsed_repositories: HashSet::new(),
             branch_scroll: UniformListScrollHandle::new(),
+            branch_search,
             view,
 
             history_search,
@@ -1503,6 +1519,8 @@ impl Patchlook {
         self.history = HistoryState::new(self.preferences.layout, cx);
         self.reset_copy_feedback();
         self.error = None;
+        self.branch_search
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.history_search
             .update(cx, |input, cx| input.set_value("", window, cx));
     }
@@ -2073,9 +2091,13 @@ impl Patchlook {
         if let Some(tree) = &self.working.change_tree {
             tree.update_group_labels(cx);
         }
-        self.history_search.update(cx, |input, cx| {
-            input.set_placeholder(tr("search_commits_placeholder"), window, cx);
-        });
+        for (input, label) in [
+            (&self.repository_search, "search_repositories"),
+            (&self.branch_search, "search_branches"),
+            (&self.history_search, "search_commits_placeholder"),
+        ] {
+            input.update(cx, |input, cx| input.set_placeholder(tr(label), window, cx));
+        }
     }
 }
 
@@ -2189,6 +2211,28 @@ fn list_scrollbar(id: &'static str, handle: &(impl ScrollbarHandle + Clone)) -> 
                     .thumb_active(|thumb| thumb.width(px(6.)).inset(px(0.)))
             }),
     )
+}
+
+fn sidebar_search_terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+fn matches_any_term(text: &str, terms: &[String]) -> bool {
+    let text = text.to_lowercase();
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn empty_search_results(id: &'static str, label: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .absolute()
+        .inset_0()
+        .px_3()
+        .py_2()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(tr(label))
 }
 
 impl Patchlook {
@@ -2500,18 +2544,46 @@ impl Patchlook {
         )
     }
 
+    fn matching_repositories(&self, terms: &[String]) -> HashSet<&RepositoryLocation> {
+        let repositories = &self.preferences.recent_repositories;
+        let parents: HashMap<_, _> = repositories
+            .iter()
+            .filter_map(|entry| {
+                let module = entry.submodule.as_ref()?;
+                Some((&entry.path, &module.parent))
+            })
+            .collect();
+        let mut matching = HashSet::new();
+        for entry in repositories
+            .iter()
+            .filter(|entry| matches_any_term(&entry.path.to_string(), terms))
+        {
+            let mut path = &entry.path;
+            while matching.insert(path) {
+                let Some(&parent) = parents.get(path) else {
+                    break;
+                };
+                path = parent;
+            }
+        }
+        matching
+    }
+
     fn repositories(&self, cx: &mut Context<Self>) -> AnyElement {
-        let has_remote = self
-            .preferences
-            .recent_repositories
-            .iter()
-            .any(|entry| entry.path.is_remote());
-        let has_local = self
-            .preferences
-            .recent_repositories
-            .iter()
-            .any(|entry| !entry.path.is_remote());
-        let show_groups = has_local && has_remote;
+        let terms = sidebar_search_terms(&self.repository_search.read(cx).value());
+        let matching = (!terms.is_empty()).then(|| self.matching_repositories(&terms));
+        let matching = matching.as_ref();
+        let searching = matching.is_some();
+        let mut groups = [Vec::new(), Vec::new()];
+        for (index, entry) in self.preferences.recent_repositories.iter().enumerate() {
+            if entry.submodule.is_none() && matching.is_none_or(|paths| paths.contains(&entry.path))
+            {
+                groups[usize::from(entry.path.is_remote())].push(index);
+            }
+        }
+        let show_groups = groups.iter().all(|entries| !entries.is_empty());
+        let count = groups.iter().map(Vec::len).sum::<usize>();
+        let groups = groups.into_iter().enumerate();
         v_flex()
             .size_full()
             .min_h_0()
@@ -2525,14 +2597,7 @@ impl Patchlook {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("recent_repositories"))
-                    .child(
-                        self.preferences
-                            .recent_repositories
-                            .iter()
-                            .filter(|e| e.submodule.is_none())
-                            .count()
-                            .to_string(),
-                    )
+                    .child(count.to_string())
                     .child(div().flex_1())
                     .child(self.repository_menu("add-repository", IconName::Plus, true, cx))
                     .child(
@@ -2563,23 +2628,13 @@ impl Patchlook {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&self.repository_scroll)
-                            .children([false, true].into_iter().filter_map(|remote| {
-                                let entries: Vec<_> = self
-                                    .preferences
-                                    .recent_repositories
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, entry)| {
-                                        entry.path.is_remote() == remote
-                                            && entry.submodule.is_none()
-                                    })
-                                    .map(|(index, _)| index)
-                                    .collect();
+                            .children(groups.filter_map(|(group, entries)| {
                                 if entries.is_empty() {
                                     return None;
                                 }
-                                let group = usize::from(remote);
-                                let expanded = !self.collapsed_repository_groups[group];
+                                let remote = group == 1;
+                                let expanded =
+                                    searching || !self.collapsed_repository_groups[group];
                                 let title = tr(if remote {
                                     "remote_repositories"
                                 } else {
@@ -2600,6 +2655,7 @@ impl Patchlook {
                                                         .hover(cx.theme().list_hover),
                                                 )
                                                 .toggled(expanded)
+                                                .disabled(searching)
                                                 .accessibility_label(title)
                                                 .w_full()
                                                 .h(px(28.))
@@ -2632,7 +2688,7 @@ impl Patchlook {
                                         })
                                         .when(!show_groups || expanded, |section| {
                                             section.children(entries.into_iter().map(|index| {
-                                                self.repository_item(index, 0, true, cx)
+                                                self.repository_item(index, 0, true, matching, cx)
                                             }))
                                         }),
                                 )
@@ -2641,8 +2697,21 @@ impl Patchlook {
                     .child(list_scrollbar(
                         "repositories-scrollbar",
                         &self.repository_scroll,
-                    )),
+                    ))
+                    .when(searching && count == 0, |list| {
+                        list.child(empty_search_results(
+                            "repository-search-empty",
+                            "no_matching_repositories",
+                            cx,
+                        ))
+                    }),
             )
+            .child(self.sidebar_search(
+                "repository-search-input",
+                "search_repositories",
+                &self.repository_search,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -2667,6 +2736,7 @@ impl Patchlook {
         index: usize,
         depth: usize,
         last: bool,
+        matching: Option<&HashSet<&RepositoryLocation>>,
         cx: &mut Context<Self>,
     ) -> Div {
         let path = &self.preferences.recent_repositories[index].path;
@@ -2675,18 +2745,28 @@ impl Patchlook {
             .recent_repositories
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.submodule.as_ref().is_some_and(|s| &s.parent == path))
+            .filter(|(_, e)| {
+                e.submodule.as_ref().is_some_and(|s| &s.parent == path)
+                    && matching.is_none_or(|paths| paths.contains(&e.path))
+            })
             .map(|(index, _)| index)
             .collect();
-        let expanded = !self.collapsed_repositories.contains(path)
+        let searching = matching.is_some();
+        let expanded = (searching || !self.collapsed_repositories.contains(path))
             && depth < self.preferences.recent_repositories.len();
         v_flex()
             .relative()
             .flex_none()
-            .child(self.repository_row(index, depth, cx))
+            .child(self.repository_row(index, depth, !children.is_empty(), searching, cx))
             .when(expanded, |group| {
                 group.children(children.iter().enumerate().map(|(position, &index)| {
-                    self.repository_item(index, depth + 1, position + 1 == children.len(), cx)
+                    self.repository_item(
+                        index,
+                        depth + 1,
+                        position + 1 == children.len(),
+                        matching,
+                        cx,
+                    )
                 }))
             })
             .when(depth > 0, |group| {
@@ -2720,16 +2800,18 @@ impl Patchlook {
             })
     }
 
-    fn repository_row(&self, index: usize, depth: usize, cx: &mut Context<Self>) -> Div {
+    fn repository_row(
+        &self,
+        index: usize,
+        depth: usize,
+        has_children: bool,
+        searching: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let entry = &self.preferences.recent_repositories[index];
         let path = entry.path.clone();
         let initialized = entry.submodule.as_ref().is_none_or(|s| s.initialized);
         let submodule = entry.submodule.is_some();
-        let has_children = self
-            .preferences
-            .recent_repositories
-            .iter()
-            .any(|e| e.submodule.as_ref().is_some_and(|s| s.parent == path));
         let expanded = !self.collapsed_repositories.contains(&path);
         let selected = self.selected_repository.as_ref() == Some(&path);
         let remote = path.is_remote();
@@ -2772,7 +2854,7 @@ impl Patchlook {
                     )
                     .when(has_children || submodule, |row| {
                         row.child(div().flex_none().w(px(REPOSITORY_DISCLOSURE_WIDTH)).when(
-                            has_children,
+                            has_children && !searching,
                             |slot| {
                                 let path = path.clone();
                                 slot.child(
@@ -2941,9 +3023,46 @@ impl Patchlook {
             )
     }
 
+    fn sidebar_search(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .p_2()
+            .on_action(
+                cx.listener(|this, _: &component::input::Escape, window, cx| {
+                    window.focus(&this.focus, cx);
+                }),
+            )
+            .child(
+                Input::new(input)
+                    .id(id)
+                    .aria_label(tr(label))
+                    .small()
+                    .cleanable(true)
+                    .flex_1(),
+            )
+    }
+
     fn branch_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let count = if self.repository.is_some() {
-            self.branches.len() + 1
+        let terms = sidebar_search_terms(&self.branch_search.read(cx).value());
+        let matching_rows = (!terms.is_empty()).then(|| {
+            self.branches
+                .iter()
+                .enumerate()
+                .filter_map(|(index, branch)| {
+                    matches_any_term(&branch.name, &terms).then_some(index + 1)
+                })
+                .collect::<Vec<_>>()
+        });
+        let branch_count = matching_rows.as_ref().map_or(self.branches.len(), Vec::len);
+        let repository_open = self.repository.is_some();
+        let row_count = if repository_open {
+            branch_count + usize::from(matching_rows.is_none())
         } else {
             0
         };
@@ -2960,7 +3079,7 @@ impl Patchlook {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("branches"))
-                    .child(self.branches.len().to_string()),
+                    .child(branch_count.to_string()),
             )
             .child(
                 div()
@@ -2970,18 +3089,38 @@ impl Patchlook {
                     .child(
                         uniform_list(
                             "branches-list",
-                            count,
-                            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            row_count,
+                            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                                 range
-                                    .map(|index| this.branch_row(index, cx))
+                                    .map(|index| {
+                                        let row = matching_rows
+                                            .as_ref()
+                                            .map_or(index, |rows| rows[index]);
+                                        this.branch_row(row, cx)
+                                    })
                                     .collect::<Vec<_>>()
                             }),
                         )
                         .track_scroll(&self.branch_scroll)
                         .size_full(),
                     )
-                    .child(list_scrollbar("branches-scrollbar", &self.branch_scroll)),
+                    .child(list_scrollbar("branches-scrollbar", &self.branch_scroll))
+                    .when(repository_open && row_count == 0, |list| {
+                        list.child(empty_search_results(
+                            "branch-search-empty",
+                            "no_matching_branches",
+                            cx,
+                        ))
+                    }),
             )
+            .when(repository_open, |view| {
+                view.child(self.sidebar_search(
+                    "branch-search-input",
+                    "search_branches",
+                    &self.branch_search,
+                    cx,
+                ))
+            })
             .into_any_element()
     }
 
@@ -4483,9 +4622,11 @@ mod tests {
             branch: "main".into(),
             branches: vec![],
             repository_scroll: ScrollHandle::new(),
+            repository_search: cx.new(|cx| InputState::new(window, cx)),
             collapsed_repository_groups: [false; 2],
             collapsed_repositories: HashSet::new(),
             branch_scroll: UniformListScrollHandle::new(),
+            branch_search: cx.new(|cx| InputState::new(window, cx)),
             view: View::Working,
 
             history_search: cx.new(|cx| InputState::new(window, cx)),
@@ -4499,6 +4640,92 @@ mod tests {
             _subscriptions: vec![],
             focus: cx.focus_handle(),
         }
+    }
+
+    #[gpui_kit::test]
+    fn branch_search_filters_by_any_term_and_browses_the_matching_ref(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["commit", "--allow-empty", "-qm", "Base"]);
+        git(root, &["branch", "feature/DeV-ui"]);
+        git(root, &["branch", "release"]);
+        git(
+            root,
+            &["update-ref", "refs/remotes/origin/master-old", "HEAD"],
+        );
+
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app =
+                        Patchlook::from_preferences(None, Preferences::default(), None, window, cx);
+                    app.view = View::Repositories;
+                    app.load(root.to_owned(), cx);
+                    app
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let (dev, master, release) = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let find_index = |name: &str| {
+                    app.read(cx)
+                        .branches
+                        .iter()
+                        .position(|branch| branch.name == name)
+                        .unwrap()
+                        + 1
+                };
+                let dev = find_index("feature/DeV-ui");
+                let master = find_index("origin/master-old");
+                let release = find_index("release");
+                assert!(window.try_find("branch-search-input").is_some());
+                assert!(window.try_find(("branch", release)).is_some());
+                app.read(cx).branch_search.clone().update(cx, |input, cx| {
+                    input.replace_all("  dev   MASTER  ", window, cx);
+                });
+                (dev, master, release)
+            })
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("branch", dev)).is_some());
+            assert!(window.try_find(("branch", master)).is_some());
+            assert!(window.try_find(("branch", release)).is_none());
+            window.click(("branch", master), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(
+                app.read(cx).viewed_branch(),
+                Some("refs/remotes/origin/master-old")
+            );
+            let input = app.read(cx).branch_search.clone();
+            input.update(cx, |input, cx| input.replace_all("unmatched", window, cx));
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find_all("branch-search-empty")
+                    .iter()
+                    .any(|item| item.visible())
+            );
+            window.click("clean", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("branch", 0usize)).is_some());
+            assert!(window.try_find(("branch", release)).is_some());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -4541,6 +4768,87 @@ mod tests {
             assert_eq!(app.repository.as_ref().unwrap().location, original);
             assert_eq!(app.selected_repository.as_ref(), Some(&original));
         });
+    }
+
+    #[gpui_kit::test]
+    fn repository_search_reveals_matching_submodules_and_remote_repositories(
+        cx: &mut TestAppContext,
+    ) {
+        use patchlook::git::{SshOptions, Submodule};
+
+        cx.update(gpui_kit::init);
+        let parent = RepositoryLocation::Local("frontend".into());
+        let child = parent.join(std::path::Path::new("deps/ui-kit")).unwrap();
+        let unrelated = RepositoryLocation::Local("sandbox".into());
+        let remote = RepositoryLocation::Ssh {
+            path: "/srv/backend".into(),
+            options: SshOptions {
+                host: "labhost".into(),
+                ..Default::default()
+            },
+        };
+        let mut preferences = Preferences::default();
+        for path in [&parent, &unrelated, &remote] {
+            preferences.add_repository(path.clone());
+        }
+        preferences.remember_submodules(
+            &parent,
+            &[Submodule {
+                location: child.clone(),
+                initialized: true,
+            }],
+        );
+        let [parent_row, child_row, unrelated_row, remote_row] =
+            [&parent, &child, &unrelated, &remote].map(|path| {
+                let index = preferences
+                    .recent_repositories
+                    .iter()
+                    .position(|entry| &entry.path == path)
+                    .unwrap();
+                ("repository", index)
+            });
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app = Patchlook::from_preferences(None, preferences, None, window, cx);
+                    app.view = View::Repositories;
+                    app.collapsed_repositories.insert(parent);
+                    app.collapsed_repository_groups[1] = true;
+                    app
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("repository-search-input").is_some());
+            assert!(window.try_find(child_row).is_none());
+            assert!(window.try_find(remote_row).is_none());
+            app.read(cx)
+                .repository_search
+                .clone()
+                .update(cx, |input, cx| {
+                    input.replace_all("  DEPS/UI  LABHOST ", window, cx);
+                });
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(parent_row).is_some());
+            assert!(window.try_find(child_row).is_some());
+            assert!(window.try_find(remote_row).is_some());
+            assert!(window.try_find(unrelated_row).is_none());
+            window.click("clean", cx);
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(parent_row).is_some());
+            assert!(window.try_find(unrelated_row).is_some());
+            assert!(window.try_find(child_row).is_none());
+            assert!(window.try_find(remote_row).is_none());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
