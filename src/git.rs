@@ -468,6 +468,38 @@ impl Repository {
         })
     }
 
+    /// Builds a comparison for a selected range using the same endpoints for
+    /// names, patches, statistics and file versions.
+    pub fn compare_commit_range(&self, oldest: &Commit, newest: &Commit) -> Result<Commit> {
+        let ancestry = self
+            .command()
+            .args(["merge-base", "--is-ancestor", &oldest.id, &newest.id])
+            .output()?;
+        if ancestry.status.code() == Some(1) {
+            bail!("The oldest selected commit is not an ancestor of the newest.");
+        }
+        ensure!(
+            ancestry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ancestry.stderr).trim()
+        );
+
+        let base = match oldest.parents.first() {
+            Some(parent) => parent.clone(),
+            None => text(output(
+                self.command()
+                    .args(["hash-object", "-t", "tree", "--stdin"])
+                    .stdin(Stdio::null()),
+                false,
+            )?)?
+            .trim()
+            .to_owned(),
+        };
+        let mut comparison = newest.clone();
+        comparison.parents = vec![base];
+        Ok(comparison)
+    }
+
     pub fn commit_changes(&self, commit: &Commit) -> Result<Vec<Change>> {
         let mut cmd = self.commit_diff_command(commit);
         cmd.args(["--name-status", "-z", "--find-renames", "--"]);
@@ -1190,6 +1222,52 @@ mod tests {
         let patch = repo.patch(target, None).unwrap();
         assert!(patch.contains("+[file].rs"));
         assert!(!patch.contains("+f.rs"));
+    }
+
+    #[test]
+    fn commit_range_reports_net_changes_and_uses_the_same_versions_for_previews() {
+        let (_temp, repo) = fixture();
+        let changed = repo.root.join("changed.txt");
+        let reverted = repo.root.join("reverted.txt");
+        fs::write(&changed, "base\n").unwrap();
+        fs::write(&reverted, "same\n").unwrap();
+        commit(&repo, "Base");
+        fs::write(&changed, "intermediate\n").unwrap();
+        fs::write(&reverted, "temporary\n").unwrap();
+        commit(&repo, "Oldest selected");
+        fs::write(&changed, "final\n").unwrap();
+        fs::write(&reverted, "same\n").unwrap();
+        commit(&repo, "Newest selected");
+
+        let commits = repo.history(0, None).unwrap().commits;
+        let comparison = repo.compare_commit_range(&commits[1], &commits[0]).unwrap();
+        let changes = repo.commit_changes(&comparison).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, Path::new("changed.txt"));
+        assert_eq!(
+            repo.commit_file_stats(&comparison).unwrap()[Path::new("changed.txt")],
+            Some(DiffStats {
+                additions: 1,
+                deletions: 1
+            })
+        );
+        let patch = repo.patch(&changes[0], Some(&comparison)).unwrap();
+        assert!(patch.contains("-base\n") && patch.contains("+final\n"));
+        assert!(!patch.contains("intermediate"));
+        let versions = repo.file_versions(&changes[0], Some(&comparison)).unwrap();
+        assert_eq!(versions.original.as_deref(), Some(&b"base\n"[..]));
+        assert_eq!(versions.modified.as_deref(), Some(&b"final\n"[..]));
+
+        let from_root = repo.compare_commit_range(&commits[2], &commits[0]).unwrap();
+        let changes = repo.commit_changes(&from_root).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|change| change.status == 'A'));
+
+        run(&repo.root, &["checkout", "-b", "side", &commits[2].id]);
+        fs::write(repo.root.join("side.txt"), "side\n").unwrap();
+        commit(&repo, "Side");
+        let side = repo.history(0, None).unwrap().commits.remove(0);
+        assert!(repo.compare_commit_range(&side, &commits[0]).is_err());
     }
 
     #[test]
